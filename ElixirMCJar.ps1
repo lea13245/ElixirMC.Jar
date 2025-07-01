@@ -7,59 +7,57 @@ $SS = @"
 ██║░░░░░██║░░░██║░╚████╔╝░██║╚════╝██╔══╝░░██║░░░░░░██╔██╗░██╔══██╗
 ███████╗╚██████╔╝░░╚██╔╝░░██║░░░░░░███████╗███████╗██╔╝╚██╗██║░░██║
 ╚══════╝░╚═════╝░░░░╚═╝░░░╚═╝░░░░░░╚══════╝╚══════╝╚═╝░░╚═╝╚═╝░░╚═╝
-"@ 
+"@
 Write-Host $SS -ForegroundColor Magenta
+
 $pecmdUrl = "https://github.com/NoDiff-del/JARs/releases/download/Jar/PECmd.exe"
-$xxstringsUrl = "https://github.com/NoDiff-del/JARs/releases/download/Jar/xxstrings64.exe"
-
 $pecmdPath = "$env:TEMP\PECmd.exe"
-$xxstringsPath = "$env:TEMP\xxstrings64.exe"
 
-Invoke-WebRequest -Uri $pecmdUrl -OutFile $pecmdPath
-Invoke-WebRequest -Uri $xxstringsUrl -OutFile $xxstringsPath
+Invoke-WebRequest -Uri $pecmdUrl -OutFile $pecmdPath -UseBasicParsing
 
 $logonTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
-
-$prefetchFolder = "C:\Windows\Prefetch"
-$files = Get-ChildItem -Path $prefetchFolder -Filter *.pf
-$filteredFiles = $files | Where-Object { 
+$prefetchFolder = "C:\\Windows\\Prefetch"
+$files = Get-ChildItem -Path $prefetchFolder -Filter *.pf | Where-Object {
     ($_.Name -match "java|javaw") -and ($_.LastWriteTime -gt $logonTime)
-}
+} | Sort-Object LastWriteTime -Descending
 
-if ($filteredFiles.Count -gt 0) {
-    Write-Host "PF files found after logon time.." -ForegroundColor Gray
-    $filteredFiles | ForEach-Object { 
+if ($files.Count -gt 0) {
+    Write-Host "PF files found after logon time (sorted by LastWriteTime).." -ForegroundColor Gray
+    $files | ForEach-Object {
         Write-Host " "
-        Write-Host $_.FullName -ForegroundColor DarkCyan
-        $prefetchFilePath = $_.FullName
-        $pecmdOutput = & $pecmdPath -f $prefetchFilePath
+        Write-Host "Analizando: $($_.Name)" -ForegroundColor DarkCyan
+        Write-Host "Última modificación del .pf: $($_.LastWriteTime)" -ForegroundColor Cyan
+
+        try {
+            $pecmdOutput = & $pecmdPath -f $_.FullName
+        } catch {
+            Write-Warning "Error ejecutando PECmd.exe en $($_.Name): $_"
+            return
+        }
+
         $filteredImports = $pecmdOutput
 
         if ($filteredImports.Count -gt 0) {
-            Write-Host "Imports found:" -ForegroundColor DarkYellow
-            $filteredImports | ForEach-Object {
-                $line = $_
+            Write-Host "Imports encontrados:" -ForegroundColor DarkYellow
+            foreach ($lineRaw in $filteredImports) {
+                if ($lineRaw -notmatch '\\VOLUME|:\\\\') {
+                    continue
+                }
+
+                $line = $lineRaw
                 if ($line -match '\\VOLUME{(.+?)}') {
                     $line = $line -replace '\\VOLUME{(.+?)}', 'C:'
                 }
                 $line = $line -replace '^\d+: ', ''
+                $line = $line.Trim()
 
-                try {
-                    if ((Get-Content $line -First 1 -ErrorAction SilentlyContinue) -match 'PK\x03\x04') {
-                        if ($line -notmatch "\.jar$") {
-                            Write-Host "File .jar modified extension: $line " -ForegroundColor DarkRed
-                        } else {
-                            Write-Host "Valid .jar file: $line" -ForegroundColor DarkGreen
-                        }
+                if ($line -match '\\[^\\]+\.[^\\]+$' -and (Test-Path $line)) {
+                    $sig = Get-AuthenticodeSignature -FilePath $line -ErrorAction SilentlyContinue
+                    if ($sig.Status -ne 'Valid') {
+                        Write-Host "[SIN FIRMA] $line" -ForegroundColor Red
                     }
-                } catch {
-                    if ($line -match "\.jar$") {
-                        Write-Host "File .jar deleted maybe: $line" -ForegroundColor DarkYellow
-                    }
-                }
-
-                if ($line -match "\.jar$" -and !(Test-Path $line)) {
-                    Write-Host "File .jar deleted maybe: $line" -ForegroundColor DarkYellow
+                } elseif ($line -match '\\[^\\]+\.[^\\]+$') {
+                    Write-Host "[NO EXISTE] $line" -ForegroundColor DarkGray
                 }
             }
         } else {
@@ -67,19 +65,5 @@ if ($filteredFiles.Count -gt 0) {
         }
     }
 } else {
-    Write-Host "No PF files containing 'java' or 'javaw' and modified after logon time were found." -ForegroundColor Red
-}
-
-Write-Output " "
-Write-Host "Searching for DcomLaunch PID..." -ForegroundColor Gray
-
-$pidDcomLaunch = (Get-CimInstance -ClassName Win32_Service | Where-Object { $_.Name -eq 'DcomLaunch' }).ProcessId
-
-$xxstringsOutput = & $xxstringsPath -p $pidDcomLaunch -raw | findstr /C:"-jar"
-
-if ($xxstringsOutput) {
-    Write-Host "Strings found in DcomLaunch process memory containing '-jar':" -ForegroundColor DarkYellow
-    $xxstringsOutput | ForEach-Object { Write-Host $_ }
-} else {
-    Write-Host "No strings containing '-jar' were found in DcomLaunch process memory." -ForegroundColor Red
+    Write-Host "No PF files para java.exe o javaw.exe modificados tras el logon." -ForegroundColor Red
 }
